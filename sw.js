@@ -1,7 +1,7 @@
 // Caja Papelería — la app abre aunque no haya internet ni señal.
 // Al subir una versión nueva de index.html, cambia el número de CACHE (caja-v1.1 -> caja-v1.2)
 // y abre la app dos veces con internet: la primera descarga lo nuevo, la segunda ya lo usa.
-const CACHE = 'caja-v1.1';
+const CACHE = 'caja-v1.2';
 const FILES = ['./', './index.html', './manifest.webmanifest', './icon-180.png', './icon-192.png', './icon-512.png'];
 
 self.addEventListener('install', e => {

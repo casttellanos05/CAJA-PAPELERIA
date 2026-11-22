@@ -310,8 +310,8 @@ select.txt{appearance:auto}
    CAJA PAPELERÍA — punto de venta por categorías
    Datos: IndexedDB en el dispositivo + respaldo en Google Sheets
    ===================================================================== */
-const VERSION = '1.1';
-const TYPES = ['sales','expenses','openings','cuts','adjustments'];
+const VERSION = '1.2';
+const TYPES = ['sales','expenses','openings','cuts','adjustments','shifts'];
 const GROUPS = {
   jug:{n:'Lila',c:'#7C5CBF',bg:'#E4D8F8',sh:'#C3B0EA',i:'#2E1F52'},
   bol:{n:'Lavanda',c:'#5A6FC0',bg:'#D9E0F7',sh:'#B2BFE8',i:'#1F2A55'},
@@ -330,7 +330,7 @@ const DEFAULT_CATS = [
   ['pap','Papelería','pap'],['cop','Copias','pap'],['plu','Plumones y colores','pap'],['lap','Lapicera','pap'],
   ['lla','Llavero','caf'],['cue','Cuetes','var'],['otr','Otros','otr']
 ].map(([id,name,g])=>({id,name,g,on:true}));
-const PERMS = [['corte','Corte'],['resumen','Resumen'],['cancel','Cancelaciones'],['ajustes','Ajustes']];
+const PERMS = [['corte','Corte'],['resumen','Resumen'],['cancel','Cancelaciones'],['ajustes','Ajustes'],['turno','Cambio de turno']];
 const EXP_CHIPS = ['Mercancía','Luz','Agua','Renta','Pasaje','Comida','Limpieza','Bolsas','Papel para copias','Otro'];
 const DIAS = ['domingo','lunes','martes','miércoles','jueves','viernes','sábado'];
 const DIAS3 = ['Dom','Lun','Mar','Mié','Jue','Vie','Sáb'];
@@ -369,7 +369,7 @@ const DB = {
   open(){ return new Promise(res=>{
     try{
       if(!window.indexedDB) throw new Error('sin indexedDB');
-      const r=indexedDB.open('caja-papeleria',1);
+      const r=indexedDB.open('caja-papeleria',2);
       r.onupgradeneeded=()=>{ const d=r.result; [...TYPES,'meta'].forEach(s=>{ if(!d.objectStoreNames.contains(s)) d.createObjectStore(s,{keyPath:'id'}); }); };
       r.onsuccess=()=>{ this.db=r.result; res(true); };
       r.onerror=()=>{ this.mem=true; res(false); };
@@ -389,10 +389,10 @@ const DB = {
 /* ---------------- estado */
 const S = {
   cfg:null,
-  d:{sales:[],expenses:[],openings:[],cuts:[],adjustments:[]},
+  d:{sales:[],expenses:[],openings:[],cuts:[],adjustments:[],shifts:[]},
   meta:{seq:0,device:'',pending:[],notice:''},
   user:null, tab:'venta', screen:'', unlocked:null,
-  cart:[], inp:{price:'',recv:'',gasto:'',open:'',counted:'',retiro:'',dev:'',pin:'',gate:''},
+  cart:[], inp:{price:'',recv:'',gasto:'',open:'',counted:'',retiro:'',dev:'',pin:'',gate:'',turno:''},
   recvBills:false, gdesc:'', cutField:'counted', cutNote:'', cutHist:false, corteView:null,
   resumen:{mode:'semana',off:0}, mtype:null, onOk:null, devCat:null, devReason:'', lastSale:null
 };
@@ -415,6 +415,7 @@ function migrateConfig(){
     let at=S.cfg.cats.length;
     for(let j=i-1;j>=0;j--){ const k=S.cfg.cats.findIndex(c=>c.id===DEFAULT_CATS[j].id); if(k>=0){ at=k+1; break; } }
     S.cfg.cats.splice(at,0,{...d}); ch=true; });
+  (S.cfg.users||[]).forEach(u=>{ u.perms=u.perms||{}; if(!('turno' in u.perms)){ u.perms.turno=true; ch=true; } });
   return ch;
 }
 async function saveMeta(k){ try{ await DB.put('meta',{id:k,v:S.meta[k]}); }catch(e){} }
@@ -555,11 +556,12 @@ function render(){
 }
 function header(){
   const u=S.user, t=[['venta','🛒','Venta'],['gastos','💸','Gastos']];
+  if(u.perms.turno) t.push(['turno','🔄','Cambio de turno']);
   if(u.perms.corte) t.push(['corte','🧾','Corte']);
   if(u.perms.resumen) t.push(['resumen','📊','Resumen']);
   if(u.perms.cancel) t.push(['cancel','↩️','Cancelaciones']);
   if(u.perms.ajustes) t.push(['ajustes','⚙️','Ajustes']);
-  const locked=k=>!['venta','gastos'].includes(k)&&!(S.unlocked&&S.unlocked.perms[k]);
+  const locked=k=>!['venta','gastos','turno'].includes(k)&&!(S.unlocked&&S.unlocked.perms[k]);
   return `<header class="top"><nav class="tabs">${t.map(([k,i,l])=>`<button class="tab ${S.tab===k?'on':''}" data-a="tab" data-v="${k}">${i} ${l}${locked(k)?' <span class="lk">🔒</span>':''}</button>`).join('')}</nav>
   <div class="who"><button class="sync" id="syncBtn" data-a="syncinfo"></button>
   <button class="userbtn" data-a="logout"><span>👤 ${esc(firstName(u.name))}</span><small>Cambiar usuario</small></button></div></header>`;
@@ -569,6 +571,11 @@ function viewTab(){
   if(t==='venta'||t==='gastos'){
     if(!currentOpening()){ S.screen='open'; return viewOpening(); }
     S.screen=t; return t==='venta'?viewVenta():viewGastos();
+  }
+  if(t==='turno'){
+    if(!S.user.perms.turno){ S.tab='venta'; return viewTab(); }
+    if(!currentOpening()){ S.screen='open'; return viewOpening(); }
+    S.screen='turno'; return viewTurno();
   }
   if(!S.user.perms[t]){ S.tab='venta'; return viewTab(); }
   if(!S.unlocked||!S.unlocked.perms[t]){ S.screen='gate'; return viewGate(t); }
@@ -604,7 +611,7 @@ function viewSetup(){
     <table class="ftable"><tr><th>Nombre</th><th>Clave (4 números)</th><th>Puede entrar a</th></tr>
     ${users.map(([n,adm],i)=>`<tr><td><input class="txt" id="suN${i}" value="${esc(n)}" maxlength="40"></td>
       <td><input class="txt pin" id="suP${i}" inputmode="numeric" pattern="[0-9]*" maxlength="4" autocomplete="off"></td>
-      <td style="font-size:16px">${adm?'<b>Todo:</b> venta, gastos, corte, resumen, cancelaciones y ajustes':'Venta y gastos'}</td></tr>`).join('')}
+      <td style="font-size:16px">${adm?'<b>Todo:</b> venta, gastos, corte, resumen, cancelaciones, ajustes y cambio de turno':'Venta, gastos y cambio de turno'}</td></tr>`).join('')}
     </table>
     <div class="hint">Puedes dejar vacío un usuario que todavía no necesites (sin nombre ni clave).</div>
   </section>
@@ -627,7 +634,7 @@ async function setupSave(){
     if(pins.has(pin)){ err='Dos usuarios tienen la misma clave. Cada clave debe ser diferente.'; break; }
     pins.add(pin);
     const all=i<2;
-    users.push({id:'u'+(i+1),name,pin,perms:{corte:all,resumen:all,cancel:all,ajustes:all}});
+    users.push({id:'u'+(i+1),name,pin,perms:{corte:all,resumen:all,cancel:all,ajustes:all,turno:true}});
   }
   if(!err&&!users.length) err='Escribe al menos un usuario.';
   if(!err&&!users.some(u=>u.perms.ajustes)) err='El primer usuario (encargada) es obligatorio.';
@@ -760,23 +767,25 @@ function modalCobro(){
       <div class="bills">${[20,50,100,200,500,1000].map(b=>`<button class="bill" data-a="bill" data-v="${b}">$${b}</button>`).join('')}<button class="bill exact" data-a="exacto" style="grid-column:span 2">Pagó exacto</button></div>
       ${keypad('recv')}</div>
     <div class="mfoot"><button class="btn ghost lg" data-a="close">← Regresar</button>
-      <button class="btn ok lg" id="saveSale" data-a="savesale" style="min-width:330px" ${cents(S.inp.recv)>=tot?'':'disabled'}>✔ GUARDAR VENTA</button></div></div>`;
+      <button class="btn ok lg" id="saveSale" data-a="savesale" style="min-width:330px" ${recvOk()?'':'disabled'}>✔ GUARDAR VENTA</button></div></div>`;
 }
 function chgHTML(){
   const tot=cartTotal(), rec=cents(S.inp.recv);
-  if(!S.inp.recv) return `<div class="chg wait">Escribe cuánto te dieron<br>o toca los billetes</div>`;
+  if(!S.inp.recv) return `<div class="chg wait">Si no escribes nada,<br>se guarda como <b>PAGO EXACTO</b></div>`;
   if(rec<tot) return `<div class="chg bad">Faltan<div class="v">${money(tot-rec)}</div></div>`;
   return `<div class="chg ok">CAMBIO<div class="v">${money(rec-tot)}</div></div>`;
 }
 function paintRecv(){
   const d=$('#recvDisp'); if(d) d.textContent='$'+showInput(S.inp.recv);
   const c=$('#chgBox'); if(c) c.innerHTML=chgHTML();
-  const b=$('#saveSale'); if(b) b.disabled=!(S.inp.recv&&cents(S.inp.recv)>=cartTotal());
+  const b=$('#saveSale'); if(b) b.disabled=!recvOk();
 }
+// Si no se escribe lo recibido, se entiende que pagó exacto
+const recvOk = () => !S.inp.recv || cents(S.inp.recv)>=cartTotal();
 let saving=false;
 async function saveSale(){
   if(saving) return;
-  const tot=cartTotal(), rec=cents(S.inp.recv);
+  const tot=cartTotal(), rec=S.inp.recv===''?tot:cents(S.inp.recv);
   if(!S.cart.length||rec<tot) return;
   saving=true;
   const folio=(S.meta.seq||0)+1;
@@ -786,11 +795,80 @@ async function saveSale(){
   catch(e){ saving=false; toast('⚠️ No se pudo guardar la venta. Intenta otra vez','bad',4000); return; }
   S.meta.seq=folio; saveMeta('seq');
   S.cart=[]; saveCart(); S.inp.recv=''; S.lastSale=sale; saving=false;
-  paintTicket();
-  openModal(`<div class="mbox done"><div class="ico">✅</div><h2>Venta #${folio} guardada</h2>
-    <p>Entrega de cambio:</p><div class="v">${money(sale.change)}</div>
-    <div class="mfoot" style="justify-content:center"><button class="btn ok lg" data-a="close" style="min-width:300px">Nueva venta</button></div></div>`,'done');
-  clearTimeout(S.doneTimer); S.doneTimer=setTimeout(()=>{ if(S.mtype==='done') closeModal(); },9000);
+  closeModal(); paintTicket();
+  toast('✅ Venta #'+folio+' guardada'+(sale.change?' · cambio '+money(sale.change):''),'ok',3000);
+}
+
+/* ---------------- CAMBIO DE TURNO */
+// Un cambio de turno por día. Se registra el efectivo contado; las ventas siguientes son del turno nuevo.
+const shiftToday = () => S.d.shifts.find(x=>dayKey(x.ts)===today())||null;
+function viewTurno(){
+  const done=shiftToday();
+  if(done) return `<div class="center"><section class="card pad20" style="font-size:22px;text-align:center;padding:44px;max-width:720px">
+    <div style="font-size:54px">✅</div><h1>Ya se hizo el cambio de turno de hoy</h1>
+    <p>Lo hizo <b>${esc(firstName(done.userName))}</b> a las <b>${fTime(done.ts)}</b>.</p>
+    <p class="muted">Se puede hacer otro cambio de turno a partir de mañana. Las ventas de ahora son del turno nuevo.</p></section></div>`;
+  return `<div class="center"><section class="card opening">
+    <div><div style="font-size:54px">🔄</div><h1>Cambio de turno</h1>
+    <p><b>${esc(firstName(S.user.name))}</b>, antes de irte <b>cuenta todo el efectivo que hay en la caja</b> y escríbelo aquí.</p>
+    <div class="display" id="turnoDisp" style="margin:14px 0">$${showInput(S.inp.turno)}</div>
+    <button class="btn ok big" data-a="doturno">TERMINAR MI TURNO</button>
+    <p class="muted" style="font-size:17px">Es opcional y solo se hace una vez al día. Las ventas que sigan se cuentan en el turno nuevo.</p></div>
+    <div>${keypad('turno')}</div></section></div>`;
+}
+function doTurno(){
+  if(shiftToday()){ render(); return; }
+  if(S.inp.turno===''){ shake('#turnoDisp'); toast('Escribe cuánto dinero hay en la caja','bad'); return; }
+  const amt=cents(S.inp.turno);
+  confirmBox('¿En la caja hay '+money(amt)+'?','<p>Revisa que esté bien contado. Al terminar se cierra tu sesión.</p>','Sí, terminar mi turno',async()=>{
+    if(shiftToday()){ closeModal(); render(); return; }
+    const op=currentOpening(), a=periodStart(), b=Date.now(), P=period(a,b);
+    const expected=(op?op.amount:0)+P.salesTotal-P.devTotal-P.expTotal;
+    const rec={id:uid(),ts:b,userId:S.user.id,userName:S.user.name,counted:amt,expected,diff:amt-expected,
+      openingId:op?op.id:null,device:S.meta.device};
+    try{ await addRecord('shifts',rec); }catch(e){ toast('No se pudo guardar. Intenta otra vez','bad'); return; }
+    const name=firstName(S.user.name);
+    S.inp.turno=''; S.user=null; S.unlocked=null; S.inp.pin=''; S.tab='venta'; closeModal(); render();
+    openModal(`<div class="mbox done"><div class="ico">🌷</div><h2>¡Gracias por todo, ${esc(name)}!</h2>
+      <p style="font-size:24px">Tu turno quedó registrado. <b>Que tengas un buen día.</b></p>
+      <div class="mfoot" style="justify-content:center"><button class="btn ok lg" data-a="close" style="min-width:260px">Hasta luego</button></div></div>`,'done');
+    clearTimeout(S.doneTimer); S.doneTimer=setTimeout(()=>{ if(S.mtype==='done') closeModal(); },10000);
+  },{cancel:'Corregir'});
+}
+// Divide el periodo del corte en turnos según los cambios de turno registrados
+function turnosOf(a,b,op){
+  const sh=S.d.shifts.filter(x=>x.ts>a&&x.ts<=b).sort((x,y)=>x.ts-y.ts);
+  if(!sh.length) return [];
+  const bounds=[a,...sh.map(x=>x.ts),b], out=[];
+  for(let i=0;i<bounds.length-1;i++){
+    const P=period(bounds[i],bounds[i+1]);
+    const start=i===0?(op?op.amount:0):sh[i-1].counted;
+    const expected=start+P.salesTotal-P.devTotal-P.expTotal;
+    const s=sh[i];
+    out.push({n:i+1,from:i===0?(op?op.ts:a):bounds[i],to:bounds[i+1],start,salesTotal:P.salesTotal,salesCount:P.valid.length,
+      devTotal:P.devTotal,expTotal:P.expTotal,expected,counted:s?s.counted:null,diff:s?s.counted-expected:null,
+      by:s?s.userName:'',cashiers:[...new Set(P.valid.map(x=>firstName(x.userName)))]});
+  }
+  return out;
+}
+function turnosHTML(s,ro){
+  const T=s.turnos; if(!T||!T.length) return '';
+  const last=T.length-1;
+  const diffTag=d=>d===0?'<span class="tag ok">Cuadra</span>':d<0?'<span class="tag">Faltaron '+money(-d)+'</span>':'<span class="tag warn">Sobraron '+money(d)+'</span>';
+  return `<section class="card sec"><h2>🔄 Turnos</h2><table class="tbl"><thead><tr><th>Turno</th><th>Horario</th><th>Cobraron</th><th class="r">Empezó con</th><th class="r">Ventas</th><th class="r">Gastos</th><th class="r">Debe haber</th><th class="r">Contado</th><th>Diferencia</th></tr></thead><tbody>
+  ${T.map((t,i)=>{ const endC=i<last?t.counted:(ro?s.counted:null), endD=endC==null?null:endC-t.expected;
+    return `<tr><td><b>${i===0?'Primer':i===1?'Segundo':'Turno '+(i+1)} turno</b>${t.by?`<br><small class="muted">Entregó: ${esc(firstName(t.by))}</small>`:''}</td>
+    <td style="white-space:nowrap">${fTime(t.from)} – ${i<last||ro?fTime(t.to):'ahora'}</td><td>${esc(t.cashiers.join(', ')||'—')}</td>
+    <td class="r">${money(t.start)}</td><td class="r">${money(t.salesTotal-t.devTotal)}<br><small class="muted">${t.salesCount} ventas</small></td><td class="r">${money(t.expTotal)}</td>
+    <td class="r"><b>${money(t.expected)}</b></td><td class="r">${endC==null?'—':money(endC)}</td><td>${endD==null?'—':diffTag(endD)}</td></tr>`; }).join('')}
+  </tbody></table><div class="hint">El segundo turno empieza con lo que se contó en el cambio de turno. El total del corte de arriba no cambia.</div></section>`;
+}
+function turnosText(c){
+  const T=c.turnos; if(!T||!T.length) return [];
+  const L=['','*Turnos*'], last=T.length-1;
+  T.forEach((t,i)=>{ const endC=i<last?t.counted:c.counted, d=endC-t.expected;
+    L.push(`${i===0?'Primer':i===1?'Segundo':'Turno '+(i+1)} turno (${fTime(t.from)}–${fTime(t.to)})${t.by?' entregó '+firstName(t.by):''}: empezó ${money(t.start)}, ventas ${money(t.salesTotal-t.devTotal)}, gastos ${money(t.expTotal)}, debe haber ${money(t.expected)}, contado ${money(endC)}, ${d===0?'cuadra':(d<0?'faltan ':'sobran ')+money(Math.abs(d))}`); });
+  return L;
 }
 
 /* ---------------- GASTOS */
@@ -834,7 +912,7 @@ function curSnap(){
     openingExpected:op?op.expected:null,salesCount:P.valid.length,salesTotal:P.salesTotal,cancelledCount:P.cancelled.length,
     devTotal:P.devTotal,expTotal:P.expTotal,expCount:P.vexp.length,expected,counted,diff:counted==null?null:counted-expected,
     withdrawal:wd,remaining:counted==null?null:counted-wd,note:S.cutNote.trim(),
-    byCat:catRows(P.byCat,P.names).map(r=>[r.id,r.name,r.amt]),days:daysOf(P,op)}};
+    byCat:catRows(P.byCat,P.names).map(r=>[r.id,r.name,r.amt]),days:daysOf(P,op),turnos:turnosOf(a,b,op)}};
 }
 function viewCorte(){
   const sub=`<div class="subtabs"><button class="sub ${!S.cutHist&&!S.corteView?'on':''}" data-a="cuthist" data-v="0">Corte actual</button>
@@ -908,7 +986,7 @@ function reportHTML(s,P,ro){
   const when=ts=>multi?`${DIAS3[new Date(ts).getDay()]} ${new Date(ts).getDate()}, ${fTime(ts)}`:fTime(ts);
   const adjLabel={cancel_venta:'Venta cancelada',devolucion:'Devolución',cancel_gasto:'Gasto cancelado'};
   const notes=openingNote(s)+(ro&&s.note?`<div class="alert info">📝 Nota: ${esc(s.note)}</div>`:'');
-  return `${notes?`<section class="card sec"><h2>Notas</h2>${notes}</section>`:''}
+  return `${notes?`<section class="card sec"><h2>Notas</h2>${notes}</section>`:''}${turnosHTML(s,ro)}
   <section class="card sec"><h2>Ventas por categoría</h2>
     ${rows.length?hbars(rows,totCat)+`<div class="res-list" style="margin-top:8px"><div><b>Total</b><b>${money(totCat)}</b></div></div>`:'<div class="empty">Todavía no hay ventas en este corte.</div>'}</section>
   <section class="card sec"><h2>Venta por venta <span class="muted" style="font-size:17px">(en el orden en que se hicieron)</span></h2>
@@ -971,7 +1049,7 @@ function cutText(c){
     ``,`Fondo inicial: ${money(c.opening)}`,`Ventas (${c.salesCount}): ${money(c.salesTotal)}`,
     c.devTotal?`Devoluciones: ${money(-c.devTotal)}`:null,`Gastos: ${money(-c.expTotal)}`,`*Debe haber: ${money(c.expected)}*`,
     `Contado: ${money(c.counted)}`,`Diferencia: ${c.diff===0?'cuadra':(c.diff<0?'faltan ':'sobran ')+money(Math.abs(c.diff))}`,
-    `Retiro: ${money(c.withdrawal)}`,`Quedó en caja: ${money(c.remaining)}`,``,`*Por categoría*`,
+    `Retiro: ${money(c.withdrawal)}`,`Quedó en caja: ${money(c.remaining)}`,...turnosText(c),``,`*Por categoría*`,
     ...c.byCat.map(([,n,a])=>`${n}: ${money(a)}`)];
   if(c.openingExpected!=null&&c.openingExpected!==c.opening) L.push('',`Nota: al abrir se contaron ${money(c.opening)} y debían ser ${money(c.openingExpected)}`);
   if(c.note) L.push('',`Nota: ${c.note}`);
@@ -988,6 +1066,7 @@ function printCut(c){
   <tr><td>Diferencia</td><td class="r">${c.diff===0?'Cuadra':money(c.diff)}</td></tr><tr><td>Retiro</td><td class="r">${money(c.withdrawal)}</td></tr>
   <tr><td><b>Quedó en caja</b></td><td class="r"><b>${money(c.remaining)}</b></td></tr></table>
   ${c.note?`<p>Nota: ${esc(c.note)}</p>`:''}
+  ${c.turnos&&c.turnos.length?`<h3>Turnos</h3><table>${turnosText(c).slice(2).map(l=>`<tr><td>${esc(l)}</td></tr>`).join('')}</table>`:''}
   <h3>Por categoría</h3><table>${c.byCat.map(([,n,a])=>`<tr><td>${esc(n)}</td><td class="r">${money(a)}</td></tr>`).join('')}</table>
   <h3>Ventas</h3><table><tr><th>#</th><th>Hora</th><th>Cobró</th><th>Artículos</th><th class="r">Total</th></tr>${P.sales.map(x=>`<tr><td>${x.folio}</td><td>${fShort(x.ts)} ${fTime(x.ts)}</td><td>${esc(firstName(x.userName))}</td><td>${x.items.map(itemTxt).join(', ')}${P.sv.has(x.id)?' (CANCELADA)':''}</td><td class="r">${money(x.total)}</td></tr>`).join('')}</table>
   <h3>Gastos</h3><table>${P.exps.map(e=>`<tr><td>${fTime(e.ts)}</td><td>${esc(e.desc)}${P.ex.has(e.id)?' (CANCELADO)':''}</td><td class="r">${money(e.amount)}</td></tr>`).join('')}</table>`;
@@ -1186,7 +1265,7 @@ function viewAjustes(){
   const c=S.cfg, sy=c.sync||{url:'',token:''}, ss=syncState();
   return wrap(`<section class="card sec"><h2>👤 Usuarios y claves</h2>
     <table class="ftable" id="usersT"><thead><tr><th>Nombre</th><th>Clave</th>${PERMS.map(([,l])=>`<th>${l}</th>`).join('')}<th></th></tr></thead><tbody>${c.users.map(userRow).join('')}</tbody></table>
-    <div class="hint">Todos pueden usar Venta y Gastos. Marca a qué más puede entrar cada persona. Las claves no se pueden repetir.</div>
+    <div class="hint">Todos pueden usar Venta y Gastos. Marca a qué más puede entrar cada persona. "Cambio de turno" no pide clave de encargada. Las claves no se pueden repetir.</div>
     <div class="row" style="margin-top:12px"><button class="btn ghost sm" data-a="adduser">+ Agregar usuario</button><span style="flex:1"></span><button class="btn ok" data-a="saveusers">Guardar usuarios</button></div></section>
   <section class="card sec"><h2>🏷️ Categorías</h2>
     <table class="ftable" id="catsT"><thead><tr><th></th><th>Nombre</th><th>Color</th><th>Visible</th><th>Orden</th></tr></thead><tbody>${c.cats.map(catRow).join('')}</tbody></table>
@@ -1312,24 +1391,25 @@ function onInput(t){
     case 'open': { const d=$('#openDisp'); if(d) d.textContent='$'+showInput(S.inp.open); break; }
     case 'cut': paintCut(); break;
     case 'dev': paintDev(); break;
+    case 'turno': { const d=$('#turnoDisp'); if(d) d.textContent='$'+showInput(S.inp.turno); break; }
   }
 }
 function kbTarget(){
   if(S.mtype==='cobro') return 'recv';
   if(S.mtype==='dev') return 'dev';
   if(S.mtype) return null;
-  return {login:'pin',gate:'gate',open:'open',venta:'price',gastos:'gasto',corte:'cut'}[S.screen]||null;
+  return {login:'pin',gate:'gate',open:'open',venta:'price',gastos:'gasto',corte:'cut',turno:'turno'}[S.screen]||null;
 }
 
 /* ---------------- acciones */
 const A = {
   key:el=>pressKey(el.dataset.t,el.dataset.k),
-  tab:el=>{ const v=el.dataset.v; if(v==='venta'||v==='gastos') S.unlocked=null; S.tab=v; S.corteView=null; S.cutHist=false; S.inp.gate=''; render(); },
+  tab:el=>{ const v=el.dataset.v; if(v==='venta'||v==='gastos'||v==='turno') S.unlocked=null; if(v==='turno') S.inp.turno=''; S.tab=v; S.corteView=null; S.cutHist=false; S.inp.gate=''; render(); },
   logout:()=>confirmBox('¿Cambiar de usuario?','<p>Se cierra la sesión de <b>'+esc(S.user.name)+'</b>. La venta que esté a medias se conserva.</p>','Sí, cambiar',()=>{ closeModal(); S.user=null; S.unlocked=null; S.inp.pin=''; render(); }),
   close:()=>closeModal(),
   mok:()=>{ const f=S.onOk; if(f) f(); },
   setupsave:()=>setupSave(), setupconnect:()=>setupConnect(),
-  abrir:()=>doOpen(),
+  abrir:()=>doOpen(), doturno:()=>doTurno(),
   addcat:el=>addCat(el),
   rmline:el=>{ S.cart.splice(+el.dataset.i,1); saveCart(); paintTicket(); },
   qplus:el=>{ const i=+el.dataset.i, it=S.cart[i]; if(!it||it.q>=99) return; it.q++; it.p=it.u*it.q; saveCart(); paintTicket(i); },
