@@ -38,6 +38,7 @@ main{flex:1;min-height:0;position:relative}
 .top{flex:0 0 auto;height:70px;background:var(--nav);color:#fff;display:flex;align-items:center;gap:10px;padding:0 10px}
 .tabs{display:flex;gap:6px;flex:1;min-width:0;overflow-x:auto;scrollbar-width:none}
 .tabs::-webkit-scrollbar{display:none}
+.tabs.many{gap:4px}.tabs.many .tab{position:relative;flex-direction:column;justify-content:center;gap:2px;padding:0 9px;font-size:14px;line-height:1.1}.tabs.many .tab .ti{font-size:19px}.tabs.many .tab .lk{position:absolute;top:2px;right:3px;font-size:11px}
 .tab{height:54px;padding:0 14px;border-radius:12px;background:var(--nav2);color:#E8E1F1;font-weight:800;font-size:18px;white-space:nowrap;display:flex;align-items:center;gap:7px;flex:0 0 auto}
 .tab.on{background:#fff;color:var(--nav)}
 .tab .lk{font-size:13px;opacity:.75}
@@ -310,7 +311,7 @@ select.txt{appearance:auto}
    CAJA PAPELERÍA — punto de venta por categorías
    Datos: IndexedDB en el dispositivo + respaldo en Google Sheets
    ===================================================================== */
-const VERSION = '1.2';
+const VERSION = '1.3';
 const TYPES = ['sales','expenses','openings','cuts','adjustments','shifts'];
 const GROUPS = {
   jug:{n:'Lila',c:'#7C5CBF',bg:'#E4D8F8',sh:'#C3B0EA',i:'#2E1F52'},
@@ -330,7 +331,7 @@ const DEFAULT_CATS = [
   ['pap','Papelería','pap'],['cop','Copias','pap'],['plu','Plumones y colores','pap'],['lap','Lapicera','pap'],
   ['lla','Llavero','caf'],['cue','Cuetes','var'],['otr','Otros','otr']
 ].map(([id,name,g])=>({id,name,g,on:true}));
-const PERMS = [['corte','Corte'],['resumen','Resumen'],['cancel','Cancelaciones'],['ajustes','Ajustes'],['turno','Cambio de turno']];
+const PERMS = [['corte','Corte'],['resumen','Resumen'],['cancel','Cancelaciones'],['ajustes','Ajustes'],['turno','Cambio de turno'],['historial','Historial']];
 const EXP_CHIPS = ['Mercancía','Luz','Agua','Renta','Pasaje','Comida','Limpieza','Bolsas','Papel para copias','Otro'];
 const DIAS = ['domingo','lunes','martes','miércoles','jueves','viernes','sábado'];
 const DIAS3 = ['Dom','Lun','Mar','Mié','Jue','Vie','Sáb'];
@@ -382,6 +383,8 @@ const DB = {
   putMany(store,arr){ if(!arr.length) return Promise.resolve();
     if(this.mem){ try{ this.lsPut(store,arr); return Promise.resolve(); }catch(e){ return Promise.reject(e); } }
     return new Promise((res,rej)=>{ const t=this.db.transaction(store,'readwrite'); const os=t.objectStore(store); arr.forEach(o=>os.put(o)); t.oncomplete=()=>res(); t.onerror=()=>rej(t.error); }); },
+  del(store,id){ if(this.mem){ try{ const o=this.ls(store); delete o[id]; localStorage.setItem('caja.db.'+store,JSON.stringify(o)); return Promise.resolve(); }catch(e){ return Promise.reject(e); } }
+    return new Promise((res,rej)=>{ const t=this.db.transaction(store,'readwrite'); t.objectStore(store).delete(id); t.oncomplete=()=>res(); t.onerror=()=>rej(t.error); t.onabort=()=>rej(t.error); }); },
   clear(store){ if(this.mem){ try{ localStorage.removeItem('caja.db.'+store); }catch(e){} return Promise.resolve(); }
     return new Promise((res,rej)=>{ const t=this.db.transaction(store,'readwrite'); t.objectStore(store).clear(); t.oncomplete=()=>res(); t.onerror=()=>rej(t.error); }); }
 };
@@ -390,7 +393,8 @@ const DB = {
 const S = {
   cfg:null,
   d:{sales:[],expenses:[],openings:[],cuts:[],adjustments:[],shifts:[]},
-  meta:{seq:0,device:'',pending:[],notice:''},
+  meta:{seq:0,device:'',pending:[],purge:[],notice:''},
+  hist:{type:'all',day:''},
   user:null, tab:'venta', screen:'', unlocked:null,
   cart:[], inp:{price:'',recv:'',gasto:'',open:'',counted:'',retiro:'',dev:'',pin:'',gate:'',turno:''},
   recvBills:false, gdesc:'', cutField:'counted', cutNote:'', cutHist:false, corteView:null,
@@ -402,6 +406,7 @@ async function load(){
   for(const t of TYPES){ S.d[t]=(await DB.all(t)).sort((a,b)=>a.ts-b.ts); }
   for(const m of await DB.all('meta')){ if(m.id==='config') S.cfg=m.v; else S.meta[m.id]=m.v; }
   if(!Array.isArray(S.meta.pending)) S.meta.pending=[];
+  if(!Array.isArray(S.meta.purge)) S.meta.purge=[];
   if(!S.meta.device){ S.meta.device=uid().slice(0,8); await saveMeta('device'); }
   if(migrateConfig()) await saveConfig();
   try{ S.cart=(JSON.parse(localStorage.getItem('caja.cart')||'[]')||[]).map(i=>{ const q=i.q||1; return {c:i.c,n:i.n,q,u:i.u!=null?i.u:Math.round(i.p/q),p:i.p}; }); }catch(e){ S.cart=[]; }
@@ -415,7 +420,8 @@ function migrateConfig(){
     let at=S.cfg.cats.length;
     for(let j=i-1;j>=0;j--){ const k=S.cfg.cats.findIndex(c=>c.id===DEFAULT_CATS[j].id); if(k>=0){ at=k+1; break; } }
     S.cfg.cats.splice(at,0,{...d}); ch=true; });
-  (S.cfg.users||[]).forEach(u=>{ u.perms=u.perms||{}; if(!('turno' in u.perms)){ u.perms.turno=true; ch=true; } });
+  (S.cfg.users||[]).forEach((u,i)=>{ u.perms=u.perms||{}; if(!('turno' in u.perms)){ u.perms.turno=true; ch=true; }
+    if(!('historial' in u.perms)){ u.perms.historial=i===0; ch=true; } });
   return ch;
 }
 async function saveMeta(k){ try{ await DB.put('meta',{id:k,v:S.meta[k]}); }catch(e){} }
@@ -426,6 +432,7 @@ async function addRecord(type,rec){
   S.d[type].push(rec); S.d[type].sort((a,b)=>a.ts-b.ts);
   await addPending(type,rec.id);
 }
+const syncCount = () => S.meta.pending.length+(S.meta.purge||[]).length;
 async function addPending(type,id){ const k=type+':'+id; if(!S.meta.pending.includes(k)){ S.meta.pending.push(k); await saveMeta('pending'); } Sync.schedule(); }
 
 /* ---------------- cálculos */
@@ -460,7 +467,7 @@ function catRows(byCat,names){ return Object.entries(byCat).filter(([,v])=>v!==0
 const Sync = {
   timer:null, busy:false, last:0, err:'', fails:0, timeoutMs:25000,
   enabled(){ return !!(S.cfg&&S.cfg.sync&&S.cfg.sync.url); },
-  schedule(ms=1500){ clearTimeout(this.timer); if(this.enabled()&&S.meta.pending.length) this.timer=setTimeout(()=>this.push(),ms); paintSync(); },
+  schedule(ms=1500){ clearTimeout(this.timer); if(this.enabled()&&syncCount()) this.timer=setTimeout(()=>this.push(),ms); paintSync(); },
   async call(body,url,token,timeout){
     url=url||S.cfg.sync.url; token=token??S.cfg.sync.token; timeout=timeout||this.timeoutMs;
     const ctl=typeof AbortController!=='undefined'?new AbortController():null; const tm=ctl?setTimeout(()=>ctl.abort(),timeout):0;
@@ -476,10 +483,17 @@ const Sync = {
   },
   async push(){
     if(!this.enabled()||this.busy) return;
-    if(!S.meta.pending.length){ paintSync(); return; }
+    if(!syncCount()){ paintSync(); return; }
     if(!navigator.onLine){ this.err='Sin internet'; paintSync(); return; }
     this.busy=true; paintSync();
     try{
+      // Historial: lo que se borró de raíz también se borra del Sheet
+      while(S.meta.purge.length){
+        const keys=S.meta.purge.slice(0,150);
+        const items=keys.map(k=>{ const i=k.indexOf(':'); return {type:k.slice(0,i),id:k.slice(i+1)}; });
+        await this.call({action:'delete',items});
+        const done=new Set(keys); S.meta.purge=S.meta.purge.filter(k=>!done.has(k)); await saveMeta('purge');
+      }
       while(S.meta.pending.length){
         const keys=S.meta.pending.slice(0,150), records=[];
         for(const k of keys){ const i=k.indexOf(':'); const type=k.slice(0,i), id=k.slice(i+1);
@@ -502,7 +516,7 @@ const Sync = {
 function syncState(){
   if(!S.cfg||!Sync.enabled()) return {cls:'',txt:'Solo en este equipo'};
   if(Sync.busy) return {cls:'busy',txt:'Subiendo…'};
-  const n=S.meta.pending.length;
+  const n=syncCount();
   if(!navigator.onLine) return {cls:n?'pend':'',txt:n?'Sin señal · '+n+' por subir':'Sin señal'};
   if(Sync.err&&n) return {cls:'err',txt:n+' sin subir'};
   if(n) return {cls:'pend',txt:n+' por subir'};
@@ -510,9 +524,9 @@ function syncState(){
 }
 function paintSync(){ const el=$('#syncBtn'); if(!el) return; const s=syncState(); el.className='sync '+s.cls; el.innerHTML='<i></i><span>'+esc(s.txt)+'</span>'; }
 async function mergeData(data,cfg){
-  let added=0;
+  let added=0; const purged=new Set(S.meta.purge||[]);
   for(const t of TYPES){
-    const have=new Set(S.d[t].map(r=>r.id));
+    const have=new Set(S.d[t].map(r=>r.id)); for(const k of purged) if(k.startsWith(t+':')) have.add(k.slice(t.length+1));
     const nw=((data&&data[t])||[]).filter(r=>r&&r.id&&typeof r.ts==='number'&&!have.has(r.id));
     if(nw.length){ await DB.putMany(t,nw); S.d[t].push(...nw); S.d[t].sort((a,b)=>a.ts-b.ts); added+=nw.length; }
   }
@@ -560,9 +574,10 @@ function header(){
   if(u.perms.corte) t.push(['corte','🧾','Corte']);
   if(u.perms.resumen) t.push(['resumen','📊','Resumen']);
   if(u.perms.cancel) t.push(['cancel','↩️','Cancelaciones']);
+  if(u.perms.historial) t.push(['historial','🗂️','Historial']);
   if(u.perms.ajustes) t.push(['ajustes','⚙️','Ajustes']);
   const locked=k=>!['venta','gastos','turno'].includes(k)&&!(S.unlocked&&S.unlocked.perms[k]);
-  return `<header class="top"><nav class="tabs">${t.map(([k,i,l])=>`<button class="tab ${S.tab===k?'on':''}" data-a="tab" data-v="${k}">${i} ${l}${locked(k)?' <span class="lk">🔒</span>':''}</button>`).join('')}</nav>
+  return `<header class="top"><nav class="tabs${t.length>6?' many':''}">${t.map(([k,i,l])=>`<button class="tab ${S.tab===k?'on':''}" data-a="tab" data-v="${k}"><span class="ti">${i}</span> <span class="tl">${l}</span>${locked(k)?' <span class="lk">🔒</span>':''}</button>`).join('')}</nav>
   <div class="who"><button class="sync" id="syncBtn" data-a="syncinfo"></button>
   <button class="userbtn" data-a="logout"><span>👤 ${esc(firstName(u.name))}</span><small>Cambiar usuario</small></button></div></header>`;
 }
@@ -580,7 +595,7 @@ function viewTab(){
   if(!S.user.perms[t]){ S.tab='venta'; return viewTab(); }
   if(!S.unlocked||!S.unlocked.perms[t]){ S.screen='gate'; return viewGate(t); }
   S.screen=t;
-  return {corte:viewCorte,resumen:viewResumen,cancel:viewCancel,ajustes:viewAjustes}[t]();
+  return {corte:viewCorte,resumen:viewResumen,cancel:viewCancel,historial:viewHistorial,ajustes:viewAjustes}[t]();
 }
 function afterRender(){
   if(S.screen==='venta'){ const tl=$('#tlines'); if(tl) tl.scrollTop=tl.scrollHeight; }
@@ -634,7 +649,7 @@ async function setupSave(){
     if(pins.has(pin)){ err='Dos usuarios tienen la misma clave. Cada clave debe ser diferente.'; break; }
     pins.add(pin);
     const all=i<2;
-    users.push({id:'u'+(i+1),name,pin,perms:{corte:all,resumen:all,cancel:all,ajustes:all,turno:true}});
+    users.push({id:'u'+(i+1),name,pin,perms:{corte:all,resumen:all,cancel:all,ajustes:all,turno:true,historial:i===0}});
   }
   if(!err&&!users.length) err='Escribe al menos un usuario.';
   if(!err&&!users.some(u=>u.perms.ajustes)) err='El primer usuario (encargada) es obligatorio.';
@@ -673,7 +688,7 @@ function tryLogin(){
   S.user=u; S.tab='venta'; S.unlocked=null; render();
 }
 function viewGate(perm){
-  const titles={corte:'Corte diario',resumen:'Resumen',cancel:'Cancelaciones y devoluciones',ajustes:'Ajustes'};
+  const titles={corte:'Corte diario',resumen:'Resumen',cancel:'Cancelaciones y devoluciones',historial:'Historial',ajustes:'Ajustes'};
   return `<div class="center"><section class="card gate">
     <div><div class="lock">🔒</div><h1>${titles[perm]}</h1><p>Escribe la clave de una encargada para entrar.</p>
     <div class="dots" id="gateDots">${dotsHTML(S.inp.gate.length)}</div><div class="msg" id="gateMsg"></div></div>
@@ -1247,6 +1262,74 @@ async function saveDev(){
   S.inp.dev=''; S.devCat=null; S.devReason=''; closeModal(); render(); toast('Devolución guardada: '+money(amt),'ok');
 }
 
+/* ---------------- HISTORIAL (borrar de raíz, sin dejar registro) */
+const HTYPES=[['all','Todo'],['sales','Ventas'],['expenses','Gastos'],['openings','Aperturas'],['cuts','Cortes'],['shifts','Cambios de turno'],['adjustments','Cancelaciones']];
+const HLBL={sales:'Venta',expenses:'Gasto',openings:'Apertura',cuts:'Corte',shifts:'Cambio de turno',adjustments:'Cancelación'};
+const ADJ_LBL={cancel_venta:'Venta cancelada',devolucion:'Devolución',cancel_gasto:'Gasto cancelado'};
+function histInfo(t,r){
+  switch(t){
+    case 'sales': return {d:`Venta #${r.folio}: ${r.items.map(itemPlain).join(', ')}`,m:r.total};
+    case 'expenses': return {d:'Gasto: '+r.desc,m:r.amount};
+    case 'openings': return {d:'Apertura de caja (fondo contado)',m:r.amount};
+    case 'cuts': return {d:`Corte de caja${(r.days||[]).length>1?' ('+r.days.length+' días)':''} · contado ${money(r.counted)} · diferencia ${money(r.diff)}`,m:r.salesTotal};
+    case 'shifts': return {d:`Cambio de turno · contado ${money(r.counted)} · diferencia ${money(r.diff)}`,m:r.counted};
+    case 'adjustments': return {d:(ADJ_LBL[r.kind]||'Ajuste')+': '+(r.detail||'')+(r.reason?' · '+r.reason:''),m:r.amount};
+  }
+  return {d:'',m:0};
+}
+// Registros que se borran junto con éste (la cancelación de una venta o gasto borrado)
+function histLinked(t,r){
+  const k=t==='sales'?'cancel_venta':t==='expenses'?'cancel_gasto':null;
+  return k?S.d.adjustments.filter(a=>a.kind===k&&a.refId===r.id):[];
+}
+function viewHistorial(){
+  const H=S.hist; if(!H.day) H.day=today();
+  const [y,m,d]=H.day.split('-').map(Number), dts=new Date(y,m-1,d).getTime();
+  const rows=[];
+  for(const t of TYPES){ if(H.type!=='all'&&H.type!==t) continue;
+    for(const r of S.d[t]) if(dayKey(r.ts)===H.day) rows.push({t,r,...histInfo(t,r)}); }
+  rows.sort((a,b)=>b.r.ts-a.r.ts);
+  const isToday=H.day===today();
+  return wrap(`<div class="alert bad">⚠️ Lo que borres aquí <b>se borra para siempre</b>, del iPad y del respaldo en Google. <b>No queda ningún registro</b> y no se puede deshacer.</div>
+  <section class="card sec">
+    <div class="row" style="align-items:center;margin-bottom:12px">
+      <button class="btn ghost" data-a="hday" data-v="-1">◀ Día anterior</button>
+      <div style="flex:1;text-align:center;font-size:22px;font-weight:900">${cap(fDateY(dts))}${isToday?' · hoy':''}</div>
+      ${isToday?'':'<button class="btn ghost" data-a="hday" data-v="0">Hoy</button>'}
+      <button class="btn ghost" data-a="hday" data-v="1" ${isToday?'disabled':''}>Día siguiente ▶</button>
+    </div>
+    <div class="subtabs">${HTYPES.map(([k,l])=>`<button class="sub ${H.type===k?'on':''}" data-a="htype" data-v="${k}">${l}</button>`).join('')}</div>
+    ${rows.length?`<table class="tbl" id="histT"><thead><tr><th>Hora</th><th>Tipo</th><th>Detalle</th><th>Quién</th><th class="r">Monto</th><th></th></tr></thead><tbody>
+    ${rows.map(x=>`<tr><td style="white-space:nowrap">${fTime(x.r.ts)}</td><td><span class="tag gray">${HLBL[x.t]}</span></td><td>${esc(x.d)}</td><td>${esc(firstName(x.r.userName))}</td><td class="r"><b>${money(x.m)}</b></td>
+      <td><button class="btn danger sm" data-a="hdel" data-t="${x.t}" data-id="${esc(x.r.id)}">🗑️ Borrar</button></td></tr>`).join('')}
+    </tbody></table><div class="muted" style="margin-top:10px;font-size:17px">${rows.length} movimiento${rows.length===1?'':'s'} este día</div>`
+    :'<div class="empty">No hay movimientos este día.</div>'}
+  </section>`);
+}
+function histAskDelete(t,id){
+  const r=(S.d[t]||[]).find(x=>x.id===id); if(!r) return;
+  const info=histInfo(t,r), linked=histLinked(t,r);
+  S.onOk=async()=>{ try{ await hardDelete([[t,r.id],...linked.map(a=>['adjustments',a.id])]); }catch(e){ toast('No se pudo borrar','bad'); return; }
+    closeModal(); render(); toast('🗑️ Borrado para siempre','ok'); };
+  openModal(`<div class="mbox"><h2>¿Borrar para siempre?</h2>
+    <p><span class="tag gray">${HLBL[t]}</span> ${fShort(r.ts)} ${fTime(r.ts)}</p><p><b>${esc(info.d)}</b></p><p style="font-size:30px;font-weight:900">${money(info.m)}</p>
+    ${linked.length?'<p>También se borra su cancelación.</p>':''}
+    <p class="muted" style="font-size:17px">Se borra del iPad y del respaldo en Google. No queda registro y no se puede deshacer.</p>
+    <div class="mfoot"><button class="btn ghost lg" data-a="close">No, regresar</button><button class="btn danger lg" data-a="mok">Sí, borrar para siempre</button></div></div>`,'confirm');
+}
+async function hardDelete(list){
+  for(const [t,id] of list){
+    await DB.del(t,id);
+    S.d[t]=S.d[t].filter(x=>x.id!==id);
+    const k=t+':'+id;
+    S.meta.pending=S.meta.pending.filter(x=>x!==k);
+    if(!S.meta.purge.includes(k)) S.meta.purge.push(k); // se borra también del Sheet (si no estaba, no pasa nada)
+  }
+  await saveMeta('pending'); await saveMeta('purge');
+  S.lastSale=S.d.sales[S.d.sales.length-1]||null;
+  Sync.schedule();
+}
+
 /* ---------------- AJUSTES */
 function userRow(u){
   return `<tr data-uid="${esc(u.id)}"><td><input class="txt" name="name" value="${esc(u.name)}" maxlength="40"></td>
@@ -1438,6 +1521,9 @@ const A = {
   devopen:()=>{ S.inp.dev=''; S.devCat=null; S.devReason=''; openModal(devModal(),'dev'); },
   devcat:el=>{ S.devCat=el.dataset.id; paintDev(); },
   savedev:()=>saveDev(),
+  hday:el=>{ const v=+el.dataset.v; if(!v) S.hist.day=today(); else { const [y,m,d]=S.hist.day.split('-').map(Number); const n=dayKey(new Date(y,m-1,d+v,12).getTime()); S.hist.day=n>today()?today():n; } render(); },
+  htype:el=>{ S.hist.type=el.dataset.v; render(); },
+  hdel:el=>histAskDelete(el.dataset.t,el.dataset.id),
   adduser:()=>{ $('#usersT tbody').insertAdjacentHTML('beforeend',userRow({id:'u'+Date.now(),name:'',pin:'',perms:{}})); },
   deluser:el=>{ el.closest('tr').remove(); },
   saveusers:()=>saveUsers(),
@@ -1492,8 +1578,8 @@ document.addEventListener('keydown',e=>{
 document.addEventListener('gesturestart',e=>e.preventDefault());
 window.addEventListener('online',()=>{ paintSync(); Sync.push(); });
 window.addEventListener('offline',()=>paintSync());
-setInterval(()=>{ if(S.meta.pending.length) Sync.push(); },60000);
-document.addEventListener('visibilitychange',()=>{ if(document.visibilityState==='visible'){ requestWake(); if(S.meta.pending.length) Sync.push(); if(S.user&&!S.mtype&&(S.screen==='venta'||S.screen==='gastos')) render(); } });
+setInterval(()=>{ if(syncCount()) Sync.push(); },60000);
+document.addEventListener('visibilitychange',()=>{ if(document.visibilityState==='visible'){ requestWake(); if(syncCount()) Sync.push(); if(S.user&&!S.mtype&&(S.screen==='venta'||S.screen==='gastos')) render(); } });
 let wake=null;
 async function requestWake(){ try{ if('wakeLock' in navigator&&!wake){ wake=await navigator.wakeLock.request('screen'); wake.addEventListener('release',()=>{ wake=null; }); } }catch(e){} }
 document.addEventListener('pointerdown',requestWake,{once:true});
@@ -1501,7 +1587,7 @@ document.addEventListener('pointerdown',requestWake,{once:true});
 /* ---------------- inicio */
 (async()=>{
   await load(); render();
-  if(Sync.enabled()&&S.meta.pending.length) Sync.push();
+  if(Sync.enabled()&&syncCount()) Sync.push();
   if('serviceWorker' in navigator&&(location.protocol==='https:'||location.hostname==='localhost')) navigator.serviceWorker.register('sw.js').catch(()=>{});
 })();
 </script>
